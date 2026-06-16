@@ -1,0 +1,2 @@
+# Audit records are written to data/audits.json at runtime (gitignored).
+# This file keeps the data/ directory in version control.
