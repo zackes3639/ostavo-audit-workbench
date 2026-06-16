@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import type {
   Audit,
@@ -18,6 +18,7 @@ import {
 import {
   deleteAuditAction,
   generateDraftAction,
+  refetchAuditAction,
   setStatusAction,
   updateAuditAction,
 } from "@/app/actions";
@@ -54,48 +55,107 @@ function hasDraftContent(a: Audit): boolean {
   );
 }
 
+// True right after auto-create, while the background draft is still running.
+function looksLikePendingAutoDraft(a: Audit): boolean {
+  const ageMs = Date.now() - new Date(a.createdAt).getTime();
+  return a.status === "intake_received" && !hasDraftContent(a) && ageMs < 120_000;
+}
+
 export function AuditEditor({ initialAudit }: { initialAudit: Audit }) {
   const [audit, setAudit] = useState<Audit>(initialAudit);
   const [view, setView] = useState<"edit" | "preview">("edit");
   const [savedAt, setSavedAt] = useState(initialAudit.updatedAt);
   const [dirty, setDirty] = useState(false);
-  const [isPending, startTransition] = useTransition();
+  const [busy, setBusy] = useState<null | "save" | "generate">(null);
+  const [generating, setGenerating] = useState(() =>
+    looksLikePendingAutoDraft(initialAudit),
+  );
+  const [draftReadyReload, setDraftReadyReload] = useState(false);
+  const [, startTransition] = useTransition();
+  const dirtyRef = useRef(false);
+
+  const isPending = busy !== null;
+
+  function markDirty() {
+    dirtyRef.current = true;
+    setDirty(true);
+  }
+  function clearDirty() {
+    dirtyRef.current = false;
+    setDirty(false);
+  }
+
+  // Poll for the auto-draft landing after create.
+  useEffect(() => {
+    if (!generating) return;
+    let attempts = 0;
+    let active = true;
+    const interval = setInterval(async () => {
+      attempts += 1;
+      const latest = await refetchAuditAction(audit.id);
+      if (!active) return;
+      const landed =
+        latest && (latest.status !== "intake_received" || hasDraftContent(latest));
+      if (landed) {
+        if (dirtyRef.current) {
+          setDraftReadyReload(true); // don't clobber the operator's edits
+        } else {
+          setAudit(latest);
+          setSavedAt(latest.updatedAt);
+        }
+        setGenerating(false);
+        clearInterval(interval);
+      } else if (attempts >= 40) {
+        setGenerating(false); // ~2 min — give up quietly
+        clearInterval(interval);
+      }
+    }, 3000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [generating, audit.id]);
 
   // Local field updates (mark dirty until saved).
   function set<K extends keyof Audit>(key: K, value: Audit[K]) {
     setAudit((prev) => ({ ...prev, [key]: value }));
-    setDirty(true);
+    markDirty();
   }
   function setScore(key: keyof AuditScores, value: number) {
     setAudit((prev) => ({ ...prev, scores: { ...prev.scores, [key]: value } }));
-    setDirty(true);
+    markDirty();
   }
 
   function handleSave() {
+    setBusy("save");
     startTransition(async () => {
-      const updated = await updateAuditAction(audit.id, {
-        status: audit.status,
-        quickSummary: audit.quickSummary,
-        scores: audit.scores,
-        mobileReview: audit.mobileReview,
-        mobileNotes: audit.mobileNotes,
-        topFixes: audit.topFixes,
-        betterHeadline: audit.betterHeadline,
-        betterSubheadline: audit.betterSubheadline,
-        betterCta: audit.betterCta,
-        recommendedNextCleanup: audit.recommendedNextCleanup,
-        internalNotes: audit.internalNotes,
-        customerName: audit.customerName,
-        customerEmail: audit.customerEmail,
-        websiteUrl: audit.websiteUrl,
-        businessType: audit.businessType,
-        primaryGoal: audit.primaryGoal,
-        intakeNotes: audit.intakeNotes,
-      });
-      if (updated) {
-        setAudit(updated);
-        setSavedAt(updated.updatedAt);
-        setDirty(false);
+      try {
+        const updated = await updateAuditAction(audit.id, {
+          status: audit.status,
+          quickSummary: audit.quickSummary,
+          scores: audit.scores,
+          mobileReview: audit.mobileReview,
+          mobileNotes: audit.mobileNotes,
+          topFixes: audit.topFixes,
+          betterHeadline: audit.betterHeadline,
+          betterSubheadline: audit.betterSubheadline,
+          betterCta: audit.betterCta,
+          recommendedNextCleanup: audit.recommendedNextCleanup,
+          internalNotes: audit.internalNotes,
+          customerName: audit.customerName,
+          customerEmail: audit.customerEmail,
+          websiteUrl: audit.websiteUrl,
+          businessType: audit.businessType,
+          primaryGoal: audit.primaryGoal,
+          intakeNotes: audit.intakeNotes,
+        });
+        if (updated) {
+          setAudit(updated);
+          setSavedAt(updated.updatedAt);
+          clearDirty();
+        }
+      } finally {
+        setBusy(null);
       }
     });
   }
@@ -122,17 +182,24 @@ export function AuditEditor({ initialAudit }: { initialAudit: Audit }) {
     if (
       hasDraftContent(audit) &&
       !window.confirm(
-        "Replace the current draft sections with fresh template content? This cannot be undone.",
+        "Replace the current draft with a fresh one generated from the website? This cannot be undone.",
       )
     ) {
       return;
     }
+    setBusy("generate");
+    setGenerating(false);
+    setDraftReadyReload(false);
     startTransition(async () => {
-      const updated = await generateDraftAction(audit.id);
-      if (updated) {
-        setAudit(updated);
-        setSavedAt(updated.updatedAt);
-        setDirty(false);
+      try {
+        const updated = await generateDraftAction(audit.id);
+        if (updated) {
+          setAudit(updated);
+          setSavedAt(updated.updatedAt);
+          clearDirty();
+        }
+      } finally {
+        setBusy(null);
       }
     });
   }
@@ -159,6 +226,27 @@ export function AuditEditor({ initialAudit }: { initialAudit: Audit }) {
           </div>
         </div>
       </div>
+
+      {generating && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-line bg-accent px-4 py-3 text-sm text-brand-ink">
+          <span className="h-3 w-3 animate-pulse rounded-full bg-brand" />
+          Reviewing the website and writing your audit draft… this usually takes 20–40
+          seconds. You can wait here — it will appear automatically.
+        </div>
+      )}
+
+      {draftReadyReload && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-line bg-accent px-4 py-3 text-sm text-brand-ink">
+          <span>A fresh draft finished generating, but you have unsaved edits.</span>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="rounded-md bg-brand px-3 py-1 text-xs font-medium text-white hover:bg-brand-ink"
+          >
+            Reload to view it
+          </button>
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-card p-3">
@@ -202,10 +290,14 @@ export function AuditEditor({ initialAudit }: { initialAudit: Audit }) {
           <button
             type="button"
             onClick={handleGenerateDraft}
-            disabled={isPending}
+            disabled={isPending || generating}
             className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-ink hover:border-brand hover:text-brand-ink disabled:opacity-50"
           >
-            Generate draft from template
+            {busy === "generate"
+              ? "Generating…"
+              : hasDraftContent(audit)
+                ? "Regenerate draft"
+                : "Generate draft"}
           </button>
           <button
             type="button"
@@ -213,7 +305,7 @@ export function AuditEditor({ initialAudit }: { initialAudit: Audit }) {
             disabled={isPending || !dirty}
             className="rounded-md bg-brand px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-ink disabled:opacity-50"
           >
-            {isPending ? "Saving…" : "Save"}
+            {busy === "save" ? "Saving…" : "Save"}
           </button>
         </div>
       </div>
