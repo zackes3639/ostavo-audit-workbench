@@ -83,10 +83,14 @@ async function generateWithClaude(audit: Audit): Promise<AuditDraft> {
 
   const stream = client.messages.stream({
     model: MODEL,
-    max_tokens: 16000,
+    // Generous ceiling so the full report never truncates mid-JSON. This is a cap,
+    // not actual spend — medium effort keeps real usage (and cost) modest.
+    max_tokens: 24000,
     thinking: { type: "adaptive" },
     output_config: {
-      effort: "high",
+      // Medium spends the budget on the audit itself rather than long internal
+      // reasoning — fuller content, lower cost, no truncated tail.
+      effort: "medium",
       format: { type: "json_schema", schema: AUDIT_DRAFT_SCHEMA },
     },
     system: SYSTEM_PROMPT,
@@ -110,25 +114,22 @@ Score what a real visitor experiences, not how the site was built. Use a 0–100
 - 40–59: confusing, incomplete, or hard to trust.
 - 0–39: major clarity problems that block action.
 
-Score four things:
-- firstImpression: in the first 5 seconds, can a visitor tell what this is and why it matters?
-- clarity: can a visitor quickly understand the offer, who it's for, and the main benefit?
-- trust: is there enough proof (reviews, credentials, real contact details) to take the next step?
-- cta: is the next step obvious, well-labeled, and repeated at the right moments?
-Also give mobileReview as exactly one of: "Strong", "Needs cleanup", "Needs urgent cleanup".
+Score four things (firstImpression, clarity, trust, cta) and give mobileReview as exactly one of: "Strong", "Needs cleanup", "Needs urgent cleanup".
 
-Write for a busy owner. Be plain, calm, specific, and practical. Tie recommendations to the owner's stated business goal and to outcomes like more calls, bookings, leads, donations, sales, or trust.
+CRITICAL — completeness: Fill EVERY field with specific, substantive content drawn from THIS website. Never leave a field blank, never return an empty list, and never use vague filler. Reference what is actually on the page — the real headline, buttons, sections, and wording — so the owner can tell you reviewed their site, not a generic template.
 
-Voice — use this kind of language: cleaner websites, clearer business, practical fixes, one clear view, better first impression, make your business easier to understand. NEVER use: AI, automation, workflow, data infrastructure, digital transformation, SaaS, or other technical/marketing jargon. Never mention that this audit was generated or that a model was involved.
+Write for a busy owner: plain, calm, specific, practical. Tie recommendations to the owner's stated business goal and to outcomes like more calls, bookings, leads, donations, sales, or trust.
 
-Fill every field:
-- quickSummary: 3–5 sentences — what works, where clarity or trust is lost, and what to fix first. Do not recommend a full redesign unless the site truly blocks trust or action.
-- topFixes: EXACTLY 5 fixes, each with a plain-language title, a one-line "whyItMatters", and a concrete "whatToChange". Pick the fixes most likely to improve calls, bookings, leads, donations, sales, or trust.
-- mobileNotes: 2–4 short notes, one per line (separate lines with a newline), about the mobile first impression, button placement, and contact path.
-- betterHeadline, betterSubheadline, betterCta: concrete rewrites tailored to THIS business — not placeholders.
-- recommendedNextCleanup: one narrow, practical next step (e.g. a homepage clarity pass), not a big project.
+Depth required for each field:
+- quickSummary: 4–6 sentences. What works, where clarity or trust is lost, and what to fix first. Don't recommend a full redesign unless the site truly blocks trust or action.
+- topFixes: EXACTLY 5 fixes, ordered by impact. Each fix needs: a plain-language "title"; "whyItMatters" (1–2 sentences tied to the goal and to a concrete outcome); and "whatToChange" (1–2 specific sentences naming the section, wording, or element to change — not generic advice).
+- betterHeadline, betterSubheadline, betterCta: concrete, ready-to-paste rewrites in the owner's actual words — the exact text they could put on the page, not a description of what to write. Never blank.
+- recommendedNextCleanup: 2–3 sentences — name one narrow, practical next cleanup, why it's the best next step, and what it would include.
+- mobileNotes: 3–5 short, specific notes, one per line (separate lines with a newline), about the mobile first impression, what's above the fold, button placement, and the contact path.
 
-If you cannot see part of the site, make the best reasonable judgment from what you can see and keep claims modest.`;
+Voice — use plain, owner-friendly language: cleaner websites, clearer business, practical fixes, one clear view, better first impression, make your business easier to understand. NEVER use: AI, automation, workflow, data infrastructure, digital transformation, SaaS, or other technical/marketing jargon. Never mention that this audit was generated or that a model was involved.
+
+If you cannot see part of the site, make the best reasonable judgment from what you can see and keep claims modest — but still fill every field.`;
 
 function buildUserText(audit: Audit, site: SiteContent | null): string {
   const lines = [
@@ -159,6 +160,8 @@ function buildUserText(audit: Audit, site: SiteContent | null): string {
 
 // JSON Schema for structured output. Structured outputs disallow numeric min/max
 // and array length constraints, so ranges/counts are enforced in normalizeDraft.
+// Property order matters: with structured output the model emits fields in this
+// order, so the most valuable sections come first and are never the truncated tail.
 const AUDIT_DRAFT_SCHEMA: Record<string, unknown> = {
   type: "object",
   additionalProperties: false,
@@ -175,11 +178,6 @@ const AUDIT_DRAFT_SCHEMA: Record<string, unknown> = {
       },
       required: ["firstImpression", "clarity", "trust", "cta"],
     },
-    mobileReview: {
-      type: "string",
-      enum: MOBILE_REVIEW_OPTIONS,
-    },
-    mobileNotes: { type: "string" },
     topFixes: {
       type: "array",
       items: {
@@ -197,17 +195,22 @@ const AUDIT_DRAFT_SCHEMA: Record<string, unknown> = {
     betterSubheadline: { type: "string" },
     betterCta: { type: "string" },
     recommendedNextCleanup: { type: "string" },
+    mobileReview: {
+      type: "string",
+      enum: MOBILE_REVIEW_OPTIONS,
+    },
+    mobileNotes: { type: "string" },
   },
   required: [
     "quickSummary",
     "scores",
-    "mobileReview",
-    "mobileNotes",
     "topFixes",
     "betterHeadline",
     "betterSubheadline",
     "betterCta",
     "recommendedNextCleanup",
+    "mobileReview",
+    "mobileNotes",
   ],
 };
 
